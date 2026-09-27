@@ -51,4 +51,18 @@ bool read_led(bool *level) {
   return true;
 }
 
+bool reported_level(int pin, bool *level) {
+  if (level == nullptr || pin < 0 || pin > 39) {
+    return false;
+  }
+
+  if (pin == kOnboardLedPin) {
+    *level = g_led_level;
+    return true;
+  }
+
+  *level = gpio_get_level(static_cast<gpio_num_t>(pin)) != 0;
+  return true;
+}
+
 }  // namespace gpio_service

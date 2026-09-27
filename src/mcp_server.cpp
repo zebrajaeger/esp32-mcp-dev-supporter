@@ -19,10 +19,95 @@ constexpr char kFirmwareVersion[] = "0.1.0";
 constexpr char kMdnsHostname[] = "esp32-mcp.local";
 constexpr size_t kMaxRequestBytes = 4096;
 
+constexpr char kDashboardHtml[] = R"html(<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 Status</title>
+<style>
+body{font:15px system-ui,sans-serif;margin:2rem;background:#10151b;color:#e7edf4}h1{margin:0}#state{color:#8be9a0}dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;background:#18212b;padding:1rem;border-radius:.5rem}dt{color:#9aa8b6}dd{margin:0}table{width:100%;border-collapse:collapse;background:#18212b}th,td{text-align:left;padding:.45rem;border-bottom:1px solid #293846}th{color:#9aa8b6}.yes{color:#8be9a0}.no{color:#ff8b8b}.na{color:#9aa8b6}.icon{font-size:1.1em;font-weight:bold}@media(max-width:600px){body{margin:1rem;font-size:13px;overflow-x:auto}}
+</style>
+<body><h1>ESP32 status</h1><p id="state">Loading...</p><dl id="device"></dl>
+<table><thead><tr><th>Pin</th><th>Class</th><th>Direction</th><th>Level</th><th>Read</th><th>Write</th><th>Managed</th></tr></thead><tbody id="pins"></tbody></table>
+<script>
+const d=document.getElementById('device'),p=document.getElementById('pins'),s=document.getElementById('state');
+const esc=v=>String(v).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const icon=(symbol,style,label)=>`<span class="icon ${style}" title="${label}" aria-label="${label}">${symbol}</span>`;
+const flag=v=>v?icon('&#10003;','yes','yes'):icon('&#10007;','no','no');
+const level=v=>v===null?icon('&#8212;','na','not available'):v?icon('&#9679;','yes','high'):icon('&#9675;','no','low');
+function show(x){d.innerHTML=`<dt>Firmware</dt><dd>${esc(x.firmwareVersion)}</dd><dt>WiFi</dt><dd>${x.wifiConnected?'connected':'disconnected'}</dd><dt>IP</dt><dd>${esc(x.ipAddress||'n/a')}</dd><dt>mDNS</dt><dd>${esc(x.mdnsHostname)}</dd><dt>Uptime</dt><dd>${x.uptimeSeconds}s</dd><dt>Free heap</dt><dd>${x.freeHeapBytes} bytes</dd>`;p.innerHTML=x.gpio.map(g=>`<tr><td>${g.pin}</td><td>${esc(g.classification)}</td><td>${esc(g.direction)}</td><td>${level(g.level)}</td><td>${flag(g.readable)}</td><td>${flag(g.writable)}</td><td>${flag(g.managed)}</td></tr>`).join('');s.textContent='Live: refreshed '+new Date().toLocaleTimeString();s.className='yes'}
+async function poll(){try{show(await fetch('/api/status',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json()}))}catch(_){s.textContent='Refresh failed; showing last successful values.';s.className='no'}}
+poll();setInterval(poll,2000)
+</script></body></html>)html";
+
 httpd_handle_t g_server = nullptr;
+
+bool is_reserved_pin(int pin) {
+  return pin >= 6 && pin <= 11;
+}
+
+bool is_valid_gpio(int pin) {
+  return pin >= 0 && pin <= 39 && pin != 20 && pin != 24 && (pin < 28 || pin > 31);
+}
+
+const char *classification_for(int pin) {
+  if (is_reserved_pin(pin)) return "reserved";
+  if (pin == gpio_service::kOnboardLedPin) return "onboard-led";
+  if (pin >= 34 && pin <= 39) return "input-only";
+  if (pin == 1 || pin == 3) return "uart";
+  if (pin == 0 || pin == 4 || pin == 5 || pin == 12 || pin == 15) return "bootstrapping";
+  return "general-purpose";
+}
+
+const char *direction_for(int pin) {
+  if (is_reserved_pin(pin)) return "reserved";
+  if (pin == gpio_service::kOnboardLedPin) return "output";
+  if (pin >= 34 && pin <= 39) return "input";
+  return "unknown";
+}
 
 void add_json_string(cJSON *object, const char *name, const char *value) {
   cJSON_AddStringToObject(object, name, value == nullptr ? "" : value);
+}
+
+void add_device_status(cJSON *status) {
+  char ip_address[16] = "";
+  wifi_manager::ip_address(ip_address, sizeof(ip_address));
+  add_json_string(status, "firmwareVersion", kFirmwareVersion);
+  cJSON_AddBoolToObject(status, "wifiConnected", wifi_manager::is_connected());
+  add_json_string(status, "ipAddress", ip_address);
+  add_json_string(status, "mdnsHostname", kMdnsHostname);
+  cJSON_AddNumberToObject(status, "uptimeSeconds", esp_timer_get_time() / 1000000);
+  cJSON_AddNumberToObject(status, "freeHeapBytes", esp_get_free_heap_size());
+}
+
+void add_gpio_inventory(cJSON *status) {
+  cJSON *pins = cJSON_AddArrayToObject(status, "gpio");
+  for (int pin = 0; pin <= 39; ++pin) {
+    if (!is_valid_gpio(pin)) continue;
+    const bool reserved = is_reserved_pin(pin);
+    const bool managed = gpio_service::is_allowed_pin(pin);
+    cJSON *entry = cJSON_CreateObject();
+    cJSON_AddNumberToObject(entry, "pin", pin);
+    cJSON_AddStringToObject(entry, "classification", classification_for(pin));
+    cJSON_AddStringToObject(entry, "direction", direction_for(pin));
+    cJSON_AddBoolToObject(entry, "readable", !reserved);
+    cJSON_AddBoolToObject(entry, "writable", managed);
+    cJSON_AddBoolToObject(entry, "managed", managed);
+    if (reserved) {
+      cJSON_AddNullToObject(entry, "level");
+    } else {
+      bool level = false;
+      if (gpio_service::reported_level(pin, &level)) cJSON_AddBoolToObject(entry, "level", level);
+      else cJSON_AddNullToObject(entry, "level");
+    }
+    cJSON_AddItemToArray(pins, entry);
+  }
+}
+
+cJSON *new_status_snapshot(bool include_gpio) {
+  cJSON *status = cJSON_CreateObject();
+  add_device_status(status);
+  if (include_gpio) add_gpio_inventory(status);
+  return status;
 }
 
 void send_json(httpd_req_t *request, cJSON *response, const char *status = HTTPD_200) {
@@ -142,17 +227,19 @@ bool requested_led_pin(const cJSON *arguments) {
 }
 
 void handle_system_status(httpd_req_t *request, const cJSON *id) {
-  char ip_address[16] = "";
-  wifi_manager::ip_address(ip_address, sizeof(ip_address));
+  send_tool_result(request, id, new_status_snapshot(false), "ESP32 status");
+}
 
-  cJSON *status = cJSON_CreateObject();
-  add_json_string(status, "firmwareVersion", kFirmwareVersion);
-  cJSON_AddBoolToObject(status, "wifiConnected", wifi_manager::is_connected());
-  add_json_string(status, "ipAddress", ip_address);
-  add_json_string(status, "mdnsHostname", kMdnsHostname);
-  cJSON_AddNumberToObject(status, "uptimeSeconds", esp_timer_get_time() / 1000000);
-  cJSON_AddNumberToObject(status, "freeHeapBytes", esp_get_free_heap_size());
-  send_tool_result(request, id, status, "ESP32 status");
+esp_err_t status_api_handler(httpd_req_t *request) {
+  send_json(request, new_status_snapshot(true));
+  return ESP_OK;
+}
+
+esp_err_t dashboard_handler(httpd_req_t *request) {
+  httpd_resp_set_type(request, "text/html; charset=utf-8");
+  httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+  httpd_resp_send(request, kDashboardHtml, HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
 }
 
 void handle_gpio_read(httpd_req_t *request, const cJSON *id, const cJSON *arguments) {
@@ -294,7 +381,7 @@ void start() {
 
   httpd_config_t configuration = HTTPD_DEFAULT_CONFIG();
   configuration.server_port = 80;
-  configuration.max_uri_handlers = 2;
+  configuration.max_uri_handlers = 4;
 
   ESP_ERROR_CHECK(httpd_start(&g_server, &configuration));
   const httpd_uri_t mcp_endpoint = {
@@ -304,6 +391,20 @@ void start() {
       .user_ctx = nullptr,
   };
   ESP_ERROR_CHECK(httpd_register_uri_handler(g_server, &mcp_endpoint));
+  const httpd_uri_t dashboard_endpoint = {
+      .uri = "/",
+      .method = HTTP_GET,
+      .handler = dashboard_handler,
+      .user_ctx = nullptr,
+  };
+  const httpd_uri_t status_endpoint = {
+      .uri = "/api/status",
+      .method = HTTP_GET,
+      .handler = status_api_handler,
+      .user_ctx = nullptr,
+  };
+  ESP_ERROR_CHECK(httpd_register_uri_handler(g_server, &dashboard_endpoint));
+  ESP_ERROR_CHECK(httpd_register_uri_handler(g_server, &status_endpoint));
   ESP_LOGI(kLogTag, "MCP server listening on http://esp32-mcp.local/mcp");
 }
 

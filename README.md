@@ -58,6 +58,28 @@ http://esp32-mcp.local/mcp
 If the local network does not resolve mDNS, use the IP address printed in the
 serial log temporarily.
 
+## HTTP Status Dashboard
+
+Open the following URL from a browser on the trusted development LAN:
+
+```text
+http://esp32-mcp.local/
+```
+
+The dashboard refreshes automatically every two seconds and shows firmware,
+network, memory, and GPIO inventory state. Its machine-readable counterpart is:
+
+```text
+http://esp32-mcp.local/api/status
+```
+
+Both HTTP status routes are read-only. They cannot configure or change a GPIO.
+The inventory marks GPIO 6-11 as flash-reserved, GPIO 34-39 as input-only,
+bootstrapping and UART pins with their special roles, and GPIO 2 as the managed
+onboard LED. A level of `n/a` means the pin is intentionally not sampled, not
+that it is low. Unconnected readable input pins can report a floating high or
+low state.
+
 ## OpenCode Configuration
 
 Add the device to the developer's OpenCode configuration after the board joins
