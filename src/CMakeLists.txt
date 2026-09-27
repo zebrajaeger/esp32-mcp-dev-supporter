@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "gpio_service.cpp"
+        "wifi_manager.cpp"
+        "mdns_responder.cpp"
+        "mcp_server.cpp"
+    INCLUDE_DIRS
+        "."
+        "../include"
+)
