@@ -25,10 +25,7 @@
 namespace {
 
 constexpr char kLogTag[] = "wifi";
-constexpr int kMaxReconnectAttempts = 10;
-
 bool g_connected = false;
-int g_reconnect_attempts = 0;
 char g_ip_address[INET_ADDRSTRLEN] = "";
 wifi_manager::ConnectedCallback g_on_connected = nullptr;
 
@@ -47,16 +44,12 @@ void event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *
   }
 
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    const auto *event = static_cast<const wifi_event_sta_disconnected_t *>(event_data);
     g_connected = false;
     g_ip_address[0] = '\0';
-    if (g_reconnect_attempts < kMaxReconnectAttempts) {
-      ++g_reconnect_attempts;
-      ESP_LOGW(kLogTag, "Disconnected; reconnect attempt %d/%d", g_reconnect_attempts,
-               kMaxReconnectAttempts);
-      connect();
-    } else {
-      ESP_LOGE(kLogTag, "WiFi reconnect limit reached");
-    }
+    ESP_LOGW(kLogTag, "Station disconnected; reason code %d", event->reason);
+    ESP_LOGW(kLogTag, "Retrying WiFi connection");
+    connect();
     return;
   }
 
@@ -64,7 +57,6 @@ void event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *
     const auto *event = static_cast<const ip_event_got_ip_t *>(event_data);
     inet_ntoa_r(event->ip_info.ip, g_ip_address, sizeof(g_ip_address));
     g_connected = true;
-    g_reconnect_attempts = 0;
     ESP_LOGI(kLogTag, "Connected with IP %s", g_ip_address);
     if (g_on_connected != nullptr) {
       g_on_connected();
@@ -99,6 +91,8 @@ void initialize(ConnectedCallback on_connected) {
   strncpy(reinterpret_cast<char *>(wifi_config.sta.password), WIFI_PASSWORD,
           sizeof(wifi_config.sta.password) - 1);
   wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+  wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+  wifi_config.sta.failure_retry_cnt = 10;
   wifi_config.sta.pmf_cfg.capable = true;
   wifi_config.sta.pmf_cfg.required = false;
 

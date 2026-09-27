@@ -15,53 +15,36 @@
 namespace {
 
 constexpr char kLogTag[] = "mcp";
-constexpr char kFirmwareVersion[] = "0.1.0";
+constexpr char kFirmwareVersion[] = "0.2.0";
 constexpr char kMdnsHostname[] = "esp32-mcp.local";
 constexpr size_t kMaxRequestBytes = 4096;
 
 constexpr char kDashboardHtml[] = R"html(<!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ESP32 Status</title>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP32 GPIO</title>
 <style>
-body{font:15px system-ui,sans-serif;margin:2rem;background:#10151b;color:#e7edf4}h1{margin:0}#state{color:#8be9a0}dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;background:#18212b;padding:1rem;border-radius:.5rem}dt{color:#9aa8b6}dd{margin:0}table{width:100%;border-collapse:collapse;background:#18212b}th,td{text-align:left;padding:.45rem;border-bottom:1px solid #293846}th{color:#9aa8b6}.yes{color:#8be9a0}.no{color:#ff8b8b}.na{color:#9aa8b6}.icon{font-size:1.1em;font-weight:bold}@media(max-width:600px){body{margin:1rem;font-size:13px;overflow-x:auto}}
-</style>
-<body><h1>ESP32 status</h1><p id="state">Loading...</p><dl id="device"></dl>
-<table><thead><tr><th>Pin</th><th>Class</th><th>Direction</th><th>Level</th><th>Read</th><th>Write</th><th>Managed</th></tr></thead><tbody id="pins"></tbody></table>
+*{box-sizing:border-box}body{font:15px system-ui,sans-serif;margin:2rem;background:#10151b;color:#e7edf4}h1{margin:0}.muted{color:#9aa8b6}#state{color:#8be9a0}.device{display:flex;flex-wrap:wrap;gap:.5rem 1rem;background:#18212b;padding:1rem;border-radius:.5rem;margin:1rem 0}.device span{white-space:nowrap}.pins{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem}.pin{padding:1rem;background:#18212b;border:1px solid #293846;border-radius:.5rem}.pin h2{font-size:1rem;margin:0 0 .25rem}.pin p{margin:.25rem 0}.pin.reserved{opacity:.58}.controls{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-top:.75rem}.controls label{display:grid;gap:.2rem;font-size:.8rem;color:#9aa8b6}select,button{font:inherit;padding:.38rem;border-radius:.3rem;border:1px solid #405365;background:#10151b;color:#e7edf4}button{cursor:pointer;background:#265f45;border-color:#3c9168}.warning{color:#ffc66d;font-size:.85rem}.error{color:#ff8b8b}@media(max-width:700px){body{margin:1rem}.pins{grid-template-columns:1fr}.controls{grid-template-columns:1fr}}
+</style><body><h1>ESP32 GPIO</h1><p id="state">Loading...</p><div class="device" id="device"></div><main class="pins" id="pins"></main>
 <script>
-const d=document.getElementById('device'),p=document.getElementById('pins'),s=document.getElementById('state');
-const esc=v=>String(v).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const icon=(symbol,style,label)=>`<span class="icon ${style}" title="${label}" aria-label="${label}">${symbol}</span>`;
-const flag=v=>v?icon('&#10003;','yes','yes'):icon('&#10007;','no','no');
-const level=v=>v===null?icon('&#8212;','na','not available'):v?icon('&#9679;','yes','high'):icon('&#9675;','no','low');
-function show(x){d.innerHTML=`<dt>Firmware</dt><dd>${esc(x.firmwareVersion)}</dd><dt>WiFi</dt><dd>${x.wifiConnected?'connected':'disconnected'}</dd><dt>IP</dt><dd>${esc(x.ipAddress||'n/a')}</dd><dt>mDNS</dt><dd>${esc(x.mdnsHostname)}</dd><dt>Uptime</dt><dd>${x.uptimeSeconds}s</dd><dt>Free heap</dt><dd>${x.freeHeapBytes} bytes</dd>`;p.innerHTML=x.gpio.map(g=>`<tr><td>${g.pin}</td><td>${esc(g.classification)}</td><td>${esc(g.direction)}</td><td>${level(g.level)}</td><td>${flag(g.readable)}</td><td>${flag(g.writable)}</td><td>${flag(g.managed)}</td></tr>`).join('');s.textContent='Live: refreshed '+new Date().toLocaleTimeString();s.className='yes'}
-async function poll(){try{show(await fetch('/api/status',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json()}))}catch(_){s.textContent='Refresh failed; showing last successful values.';s.className='no'}}
-poll();setInterval(poll,2000)
+const d=document.querySelector('#device'),p=document.querySelector('#pins'),s=document.querySelector('#state');
+const esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const boot=g=>g.bootstrapping?'<p class="warning">Bootstrapping pin: changes can affect the next boot.</p>':'';
+function choices(selected,values){return values.map(v=>`<option ${v===selected?'selected':''}>${v}</option>`).join('')}
+function card(g){const inaccessible=!g.accessible, inputOnly=g.classification==='input-only',modes=inputOnly?['input']:['input','output'];const controls=inaccessible?'':`<div class="controls"><label>Mode<select data-mode>${choices(g.mode,modes)}</select></label><label>Pull<select data-pull ${g.mode==='output'||inputOnly?'disabled':''}>${choices(g.pull,['none','up','down'])}</select></label><label>Initial / output level<select data-level>${choices(g.level?'high':'low',['low','high'])}</select></label><button data-apply>Apply configuration</button>${g.writable?'<button data-write>Set output level</button>':''}</div>`;return `<section class="pin ${inaccessible?'reserved':''}" data-pin="${g.pin}"><h2>GPIO ${g.pin}</h2><p>${esc(g.classification)} | ${esc(g.mode||'unavailable')} | pull: ${esc(g.pull||'n/a')}</p><p>Level: ${g.level===null?'n/a':g.level?'high':'low'}</p>${inaccessible?'<p class="muted">This pin is unavailable for GPIO access.</p>':boot(g)+controls}<p class="error" data-error></p></section>`}
+function show(x){d.innerHTML=`<span>Firmware ${esc(x.firmwareVersion)}</span><span>WiFi: ${x.wifiConnected?'connected':'disconnected'}</span><span>${esc(x.ipAddress||'n/a')}</span><span>Uptime ${x.uptimeSeconds}s</span><span>Heap ${x.freeHeapBytes} B</span>`;p.innerHTML=x.gpio.map(card).join('');s.textContent='Live: refreshed '+new Date().toLocaleTimeString();s.className='';}
+async function request(path,data){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const x=await r.json();if(!r.ok)throw Error(x.error||'Request failed');return x}
+p.addEventListener('click',async e=>{const button=e.target;if(!button.matches('[data-apply],[data-write]'))return;const card=button.closest('[data-pin]'),pin=Number(card.dataset.pin),error=card.querySelector('[data-error]'),mode=card.querySelector('[data-mode]').value,pull=card.querySelector('[data-pull]').value,level=card.querySelector('[data-level]').value==='high';error.textContent='';try{if(button.matches('[data-apply]')){if(card.querySelector('.warning')&&!confirm('This bootstrapping pin can affect the next boot. Continue?'))return;await request('/api/gpio/configure',mode==='input'?{pin,mode,pull}:{pin,mode,initialLevel:level})}else await request('/api/gpio/write',{pin,level});await poll()}catch(err){error.textContent=err.message}});
+async function poll(){try{show(await fetch('/api/status',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json()}))}catch(_){s.textContent='Refresh failed; showing last successful values.';s.className='error'}}poll();setInterval(poll,2000)
 </script></body></html>)html";
 
 httpd_handle_t g_server = nullptr;
 
-bool is_reserved_pin(int pin) {
-  return pin >= 6 && pin <= 11;
-}
-
-bool is_valid_gpio(int pin) {
-  return pin >= 0 && pin <= 39 && pin != 20 && pin != 24 && (pin < 28 || pin > 31);
-}
-
 const char *classification_for(int pin) {
-  if (is_reserved_pin(pin)) return "reserved";
+  if (gpio_service::is_reserved_pin(pin)) return "reserved";
+  if (gpio_service::is_uart_pin(pin)) return "uart";
   if (pin == gpio_service::kOnboardLedPin) return "onboard-led";
-  if (pin >= 34 && pin <= 39) return "input-only";
-  if (pin == 1 || pin == 3) return "uart";
-  if (pin == 0 || pin == 4 || pin == 5 || pin == 12 || pin == 15) return "bootstrapping";
+  if (gpio_service::is_input_only_pin(pin)) return "input-only";
+  if (gpio_service::is_bootstrapping_pin(pin)) return "bootstrapping";
   return "general-purpose";
-}
-
-const char *direction_for(int pin) {
-  if (is_reserved_pin(pin)) return "reserved";
-  if (pin == gpio_service::kOnboardLedPin) return "output";
-  if (pin >= 34 && pin <= 39) return "input";
-  return "unknown";
 }
 
 void add_json_string(cJSON *object, const char *name, const char *value) {
@@ -79,26 +62,52 @@ void add_device_status(cJSON *status) {
   cJSON_AddNumberToObject(status, "freeHeapBytes", esp_get_free_heap_size());
 }
 
+void add_pin_status(cJSON *entry, int pin) {
+  const bool accessible = gpio_service::is_accessible_pin(pin);
+  cJSON_AddNumberToObject(entry, "pin", pin);
+  cJSON_AddStringToObject(entry, "classification", classification_for(pin));
+  cJSON_AddBoolToObject(entry, "accessible", accessible);
+  cJSON_AddBoolToObject(entry, "bootstrapping", gpio_service::is_bootstrapping_pin(pin));
+  if (!accessible) {
+    cJSON_AddStringToObject(entry, "direction", "unavailable");
+    cJSON_AddBoolToObject(entry, "readable", false);
+    cJSON_AddBoolToObject(entry, "configurable", false);
+    cJSON_AddBoolToObject(entry, "writable", false);
+    cJSON_AddBoolToObject(entry, "managed", false);
+    cJSON_AddNullToObject(entry, "mode");
+    cJSON_AddNullToObject(entry, "pull");
+    cJSON_AddNullToObject(entry, "level");
+    return;
+  }
+
+  gpio_service::PinState state = {};
+  if (gpio_service::state(pin, &state) != gpio_service::Result::kOk) {
+    cJSON_AddStringToObject(entry, "direction", "error");
+    cJSON_AddBoolToObject(entry, "readable", false);
+    cJSON_AddBoolToObject(entry, "configurable", false);
+    cJSON_AddBoolToObject(entry, "writable", false);
+    cJSON_AddBoolToObject(entry, "managed", false);
+    cJSON_AddNullToObject(entry, "mode");
+    cJSON_AddNullToObject(entry, "pull");
+    cJSON_AddNullToObject(entry, "level");
+    return;
+  }
+  cJSON_AddStringToObject(entry, "direction", gpio_service::mode_name(state.mode));
+  cJSON_AddBoolToObject(entry, "readable", state.readable);
+  cJSON_AddBoolToObject(entry, "configurable", state.configurable);
+  cJSON_AddBoolToObject(entry, "writable", state.writable);
+  cJSON_AddBoolToObject(entry, "managed", true);
+  cJSON_AddStringToObject(entry, "mode", gpio_service::mode_name(state.mode));
+  cJSON_AddStringToObject(entry, "pull", gpio_service::pull_name(state.pull));
+  cJSON_AddBoolToObject(entry, "level", state.level);
+}
+
 void add_gpio_inventory(cJSON *status) {
   cJSON *pins = cJSON_AddArrayToObject(status, "gpio");
   for (int pin = 0; pin <= 39; ++pin) {
-    if (!is_valid_gpio(pin)) continue;
-    const bool reserved = is_reserved_pin(pin);
-    const bool managed = gpio_service::is_allowed_pin(pin);
+    if (!gpio_service::is_valid_pin(pin)) continue;
     cJSON *entry = cJSON_CreateObject();
-    cJSON_AddNumberToObject(entry, "pin", pin);
-    cJSON_AddStringToObject(entry, "classification", classification_for(pin));
-    cJSON_AddStringToObject(entry, "direction", direction_for(pin));
-    cJSON_AddBoolToObject(entry, "readable", !reserved);
-    cJSON_AddBoolToObject(entry, "writable", managed);
-    cJSON_AddBoolToObject(entry, "managed", managed);
-    if (reserved) {
-      cJSON_AddNullToObject(entry, "level");
-    } else {
-      bool level = false;
-      if (gpio_service::reported_level(pin, &level)) cJSON_AddBoolToObject(entry, "level", level);
-      else cJSON_AddNullToObject(entry, "level");
-    }
+    add_pin_status(entry, pin);
     cJSON_AddItemToArray(pins, entry);
   }
 }
@@ -110,6 +119,12 @@ cJSON *new_status_snapshot(bool include_gpio) {
   return status;
 }
 
+cJSON *new_pin_snapshot(int pin) {
+  cJSON *entry = cJSON_CreateObject();
+  add_pin_status(entry, pin);
+  return entry;
+}
+
 void send_json(httpd_req_t *request, cJSON *response, const char *status = HTTPD_200) {
   char *serialized = cJSON_PrintUnformatted(response);
   cJSON_Delete(response);
@@ -117,7 +132,6 @@ void send_json(httpd_req_t *request, cJSON *response, const char *status = HTTPD
     httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "Response allocation failed");
     return;
   }
-
   httpd_resp_set_status(request, status);
   httpd_resp_set_type(request, "application/json");
   httpd_resp_set_hdr(request, "Cache-Control", "no-store");
@@ -125,14 +139,17 @@ void send_json(httpd_req_t *request, cJSON *response, const char *status = HTTPD
   cJSON_free(serialized);
 }
 
+void send_http_error(httpd_req_t *request, const char *status, const char *message) {
+  cJSON *response = cJSON_CreateObject();
+  cJSON_AddStringToObject(response, "error", message);
+  send_json(request, response, status);
+}
+
 cJSON *new_response(const cJSON *id) {
   cJSON *response = cJSON_CreateObject();
   cJSON_AddStringToObject(response, "jsonrpc", "2.0");
-  if (id != nullptr) {
-    cJSON_AddItemToObject(response, "id", cJSON_Duplicate(id, true));
-  } else {
-    cJSON_AddNullToObject(response, "id");
-  }
+  if (id != nullptr) cJSON_AddItemToObject(response, "id", cJSON_Duplicate(id, true));
+  else cJSON_AddNullToObject(response, "id");
   return response;
 }
 
@@ -153,33 +170,80 @@ void send_tool_result(httpd_req_t *request, const cJSON *id, cJSON *structured_c
   cJSON_AddStringToObject(item, "type", "text");
   cJSON_AddStringToObject(item, "text", text);
   cJSON_AddItemToArray(content, item);
-  if (structured_content != nullptr) {
-    cJSON_AddItemToObject(result, "structuredContent", structured_content);
-  }
-  if (is_error) {
-    cJSON_AddBoolToObject(result, "isError", true);
-  }
+  if (structured_content != nullptr) cJSON_AddItemToObject(result, "structuredContent", structured_content);
+  if (is_error) cJSON_AddBoolToObject(result, "isError", true);
   send_json(request, response);
 }
 
-cJSON *gpio_schema(const bool include_level) {
+bool get_pin(const cJSON *arguments, int *pin) {
+  const cJSON *value = cJSON_GetObjectItemCaseSensitive(arguments, "pin");
+  if (!cJSON_IsNumber(value) || value->valuedouble != value->valueint) return false;
+  *pin = value->valueint;
+  return true;
+}
+
+bool get_boolean(const cJSON *arguments, const char *name, bool *value) {
+  const cJSON *item = cJSON_GetObjectItemCaseSensitive(arguments, name);
+  if (!cJSON_IsBool(item)) return false;
+  *value = cJSON_IsTrue(item);
+  return true;
+}
+
+bool get_string(const cJSON *arguments, const char *name, const char **value) {
+  const cJSON *item = cJSON_GetObjectItemCaseSensitive(arguments, name);
+  if (!cJSON_IsString(item)) return false;
+  *value = item->valuestring;
+  return true;
+}
+
+bool parse_pull(const char *name, gpio_service::Pull *pull) {
+  if (strcmp(name, "none") == 0) *pull = gpio_service::Pull::kNone;
+  else if (strcmp(name, "up") == 0) *pull = gpio_service::Pull::kUp;
+  else if (strcmp(name, "down") == 0) *pull = gpio_service::Pull::kDown;
+  else return false;
+  return true;
+}
+
+cJSON *pin_schema() {
   cJSON *schema = cJSON_CreateObject();
   cJSON_AddStringToObject(schema, "type", "object");
   cJSON *properties = cJSON_AddObjectToObject(schema, "properties");
   cJSON *pin = cJSON_AddObjectToObject(properties, "pin");
   cJSON_AddStringToObject(pin, "type", "integer");
-  cJSON_AddNumberToObject(pin, "const", gpio_service::kOnboardLedPin);
-  cJSON_AddStringToObject(pin, "description", "Only GPIO 2 is available in this release.");
-  if (include_level) {
-    cJSON *level = cJSON_AddObjectToObject(properties, "level");
-    cJSON_AddStringToObject(level, "type", "boolean");
-  }
+  cJSON_AddStringToObject(pin, "description", "ESP32 GPIO number; UART GPIO 1/3 and flash GPIO 6-11 are inaccessible.");
   cJSON *required = cJSON_AddArrayToObject(schema, "required");
   cJSON_AddItemToArray(required, cJSON_CreateString("pin"));
-  if (include_level) {
-    cJSON_AddItemToArray(required, cJSON_CreateString("level"));
-  }
   cJSON_AddBoolToObject(schema, "additionalProperties", false);
+  return schema;
+}
+
+cJSON *write_schema() {
+  cJSON *schema = pin_schema();
+  cJSON *properties = cJSON_GetObjectItemCaseSensitive(schema, "properties");
+  cJSON *level = cJSON_AddObjectToObject(properties, "level");
+  cJSON_AddStringToObject(level, "type", "boolean");
+  cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(schema, "required"), cJSON_CreateString("level"));
+  return schema;
+}
+
+cJSON *configure_schema() {
+  cJSON *schema = pin_schema();
+  cJSON *properties = cJSON_GetObjectItemCaseSensitive(schema, "properties");
+  cJSON *mode = cJSON_AddObjectToObject(properties, "mode");
+  cJSON_AddStringToObject(mode, "type", "string");
+  cJSON *mode_values = cJSON_AddArrayToObject(mode, "enum");
+  cJSON_AddItemToArray(mode_values, cJSON_CreateString("input"));
+  cJSON_AddItemToArray(mode_values, cJSON_CreateString("output"));
+  cJSON *pull = cJSON_AddObjectToObject(properties, "pull");
+  cJSON_AddStringToObject(pull, "type", "string");
+  cJSON *pull_values = cJSON_AddArrayToObject(pull, "enum");
+  cJSON_AddItemToArray(pull_values, cJSON_CreateString("none"));
+  cJSON_AddItemToArray(pull_values, cJSON_CreateString("up"));
+  cJSON_AddItemToArray(pull_values, cJSON_CreateString("down"));
+  cJSON *initial = cJSON_AddObjectToObject(properties, "initialLevel");
+  cJSON_AddStringToObject(initial, "type", "boolean");
+  cJSON_AddStringToObject(initial, "description", "Required when mode is output.");
+  cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(schema, "required"), cJSON_CreateString("mode"));
   return schema;
 }
 
@@ -208,22 +272,73 @@ void handle_tools_list(httpd_req_t *request, const cJSON *id) {
   cJSON *response = new_response(id);
   cJSON *result = cJSON_AddObjectToObject(response, "result");
   cJSON *tools = cJSON_AddArrayToObject(result, "tools");
-
   cJSON *status_schema = cJSON_CreateObject();
   cJSON_AddStringToObject(status_schema, "type", "object");
   cJSON_AddObjectToObject(status_schema, "properties");
   cJSON_AddBoolToObject(status_schema, "additionalProperties", false);
   add_tool(tools, "system.status", "Return firmware and network status.", status_schema);
-  add_tool(tools, "gpio.read", "Read the current level of the onboard LED on GPIO 2.",
-           gpio_schema(false));
-  add_tool(tools, "gpio.write", "Set the onboard LED on GPIO 2.", gpio_schema(true));
+  add_tool(tools, "gpio.configure", "Configure GPIO input/pull or output/initial level.", configure_schema());
+  add_tool(tools, "gpio.read", "Read GPIO level and runtime configuration.", pin_schema());
+  add_tool(tools, "gpio.write", "Set a GPIO already configured as output.", write_schema());
   send_json(request, response);
 }
 
-bool requested_led_pin(const cJSON *arguments) {
-  const cJSON *pin = cJSON_GetObjectItemCaseSensitive(arguments, "pin");
-  return cJSON_IsNumber(pin) && pin->valuedouble == gpio_service::kOnboardLedPin &&
-         gpio_service::is_allowed_pin(pin->valueint);
+void send_gpio_result(httpd_req_t *request, const cJSON *id, int pin, gpio_service::Result result) {
+  if (result != gpio_service::Result::kOk) {
+    send_tool_result(request, id, nullptr, gpio_service::result_message(result), true);
+    return;
+  }
+  send_tool_result(request, id, new_pin_snapshot(pin), "GPIO operation succeeded.");
+}
+
+void handle_gpio_read(httpd_req_t *request, const cJSON *id, const cJSON *arguments) {
+  int pin = 0;
+  if (!get_pin(arguments, &pin)) {
+    send_tool_result(request, id, nullptr, "gpio.read requires an integer pin.", true);
+    return;
+  }
+  gpio_service::PinState state = {};
+  send_gpio_result(request, id, pin, gpio_service::state(pin, &state));
+}
+
+gpio_service::Result configure_from_arguments(const cJSON *arguments, int *pin) {
+  const char *mode = nullptr;
+  if (!get_pin(arguments, pin) || !get_string(arguments, "mode", &mode)) return gpio_service::Result::kInvalidPin;
+  if (strcmp(mode, "input") == 0) {
+    const char *pull_name = nullptr;
+    gpio_service::Pull pull = gpio_service::Pull::kNone;
+    if (!get_string(arguments, "pull", &pull_name) || !parse_pull(pull_name, &pull)) {
+      return gpio_service::Result::kInvalidPull;
+    }
+    return gpio_service::configure_input(*pin, pull);
+  }
+  if (strcmp(mode, "output") == 0) {
+    bool initial_level = false;
+    if (cJSON_GetObjectItemCaseSensitive(arguments, "pull") != nullptr) return gpio_service::Result::kInvalidPull;
+    if (!get_boolean(arguments, "initialLevel", &initial_level)) return gpio_service::Result::kDriverError;
+    return gpio_service::configure_output(*pin, initial_level);
+  }
+  return gpio_service::Result::kInvalidPin;
+}
+
+void handle_gpio_configure(httpd_req_t *request, const cJSON *id, const cJSON *arguments) {
+  int pin = 0;
+  const gpio_service::Result result = configure_from_arguments(arguments, &pin);
+  if (result == gpio_service::Result::kInvalidPin && !get_pin(arguments, &pin)) {
+    send_tool_result(request, id, nullptr, "gpio.configure requires an integer pin and mode.", true);
+    return;
+  }
+  send_gpio_result(request, id, pin, result);
+}
+
+void handle_gpio_write(httpd_req_t *request, const cJSON *id, const cJSON *arguments) {
+  int pin = 0;
+  bool level = false;
+  if (!get_pin(arguments, &pin) || !get_boolean(arguments, "level", &level)) {
+    send_tool_result(request, id, nullptr, "gpio.write requires an integer pin and Boolean level.", true);
+    return;
+  }
+  send_gpio_result(request, id, pin, gpio_service::write(pin, level));
 }
 
 void handle_system_status(httpd_req_t *request, const cJSON *id) {
@@ -242,43 +357,60 @@ esp_err_t dashboard_handler(httpd_req_t *request) {
   return ESP_OK;
 }
 
-void handle_gpio_read(httpd_req_t *request, const cJSON *id, const cJSON *arguments) {
-  if (!requested_led_pin(arguments)) {
-    send_tool_result(request, id, nullptr, "Only GPIO 2 is available.", true);
-    return;
+cJSON *receive_json(httpd_req_t *request) {
+  if (request->content_len == 0 || request->content_len > kMaxRequestBytes) return nullptr;
+  char *body = static_cast<char *>(malloc(request->content_len + 1));
+  if (body == nullptr) return nullptr;
+  size_t received = 0;
+  while (received < request->content_len) {
+    const int result = httpd_req_recv(request, body + received, request->content_len - received);
+    if (result <= 0) {
+      free(body);
+      return nullptr;
+    }
+    received += static_cast<size_t>(result);
   }
-
-  bool level = false;
-  if (!gpio_service::read_led(&level)) {
-    send_tool_result(request, id, nullptr, "Could not read GPIO 2.", true);
-    return;
-  }
-
-  cJSON *result = cJSON_CreateObject();
-  cJSON_AddNumberToObject(result, "pin", gpio_service::kOnboardLedPin);
-  cJSON_AddBoolToObject(result, "level", level);
-  send_tool_result(request, id, result, level ? "GPIO 2 is high." : "GPIO 2 is low.");
+  body[received] = '\0';
+  cJSON *json = cJSON_ParseWithLength(body, received);
+  free(body);
+  return json;
 }
 
-void handle_gpio_write(httpd_req_t *request, const cJSON *id, const cJSON *arguments) {
-  const cJSON *level = cJSON_GetObjectItemCaseSensitive(arguments, "level");
-  if (!requested_led_pin(arguments) || !cJSON_IsBool(level)) {
-    send_tool_result(request, id, nullptr,
-                     "gpio.write requires pin 2 and a Boolean level.", true);
-    return;
+esp_err_t gpio_configure_api_handler(httpd_req_t *request) {
+  cJSON *arguments = receive_json(request);
+  if (!cJSON_IsObject(arguments)) {
+    cJSON_Delete(arguments);
+    send_http_error(request, "400 Bad Request", "Expected a JSON object.");
+    return ESP_OK;
   }
-
-  const bool requested_level = cJSON_IsTrue(level);
-  if (!gpio_service::write_led(requested_level)) {
-    send_tool_result(request, id, nullptr, "Could not write GPIO 2.", true);
-    return;
+  int pin = 0;
+  const gpio_service::Result result = configure_from_arguments(arguments, &pin);
+  cJSON_Delete(arguments);
+  if (result != gpio_service::Result::kOk) {
+    send_http_error(request, "400 Bad Request", gpio_service::result_message(result));
+    return ESP_OK;
   }
+  send_json(request, new_pin_snapshot(pin));
+  return ESP_OK;
+}
 
-  cJSON *result = cJSON_CreateObject();
-  cJSON_AddNumberToObject(result, "pin", gpio_service::kOnboardLedPin);
-  cJSON_AddBoolToObject(result, "level", requested_level);
-  send_tool_result(request, id, result,
-                   requested_level ? "GPIO 2 set high." : "GPIO 2 set low.");
+esp_err_t gpio_write_api_handler(httpd_req_t *request) {
+  cJSON *arguments = receive_json(request);
+  int pin = 0;
+  bool level = false;
+  if (!cJSON_IsObject(arguments) || !get_pin(arguments, &pin) || !get_boolean(arguments, "level", &level)) {
+    cJSON_Delete(arguments);
+    send_http_error(request, "400 Bad Request", "gpio.write requires an integer pin and Boolean level.");
+    return ESP_OK;
+  }
+  const gpio_service::Result result = gpio_service::write(pin, level);
+  cJSON_Delete(arguments);
+  if (result != gpio_service::Result::kOk) {
+    send_http_error(request, "400 Bad Request", gpio_service::result_message(result));
+    return ESP_OK;
+  }
+  send_json(request, new_pin_snapshot(pin));
+  return ESP_OK;
 }
 
 void handle_tool_call(httpd_req_t *request, const cJSON *id, const cJSON *params) {
@@ -286,27 +418,19 @@ void handle_tool_call(httpd_req_t *request, const cJSON *id, const cJSON *params
     send_json_rpc_error(request, id, -32602, "tools/call requires object parameters");
     return;
   }
-
   const cJSON *name = cJSON_GetObjectItemCaseSensitive(params, "name");
   const cJSON *arguments = cJSON_GetObjectItemCaseSensitive(params, "arguments");
   if (!cJSON_IsString(name)) {
     send_json_rpc_error(request, id, -32602, "tools/call requires a tool name");
-    return;
-  }
-
-  if (strcmp(name->valuestring, "system.status") == 0) {
+  } else if (strcmp(name->valuestring, "system.status") == 0) {
     handle_system_status(request, id);
+  } else if (!cJSON_IsObject(arguments)) {
+    send_json_rpc_error(request, id, -32602, "GPIO tools require object arguments");
   } else if (strcmp(name->valuestring, "gpio.read") == 0) {
-    if (!cJSON_IsObject(arguments)) {
-      send_json_rpc_error(request, id, -32602, "gpio.read requires object arguments");
-      return;
-    }
     handle_gpio_read(request, id, arguments);
+  } else if (strcmp(name->valuestring, "gpio.configure") == 0) {
+    handle_gpio_configure(request, id, arguments);
   } else if (strcmp(name->valuestring, "gpio.write") == 0) {
-    if (!cJSON_IsObject(arguments)) {
-      send_json_rpc_error(request, id, -32602, "gpio.write requires object arguments");
-      return;
-    }
     handle_gpio_write(request, id, arguments);
   } else {
     send_json_rpc_error(request, id, -32601, "Unknown tool");
@@ -314,44 +438,16 @@ void handle_tool_call(httpd_req_t *request, const cJSON *id, const cJSON *params
 }
 
 esp_err_t mcp_handler(httpd_req_t *request) {
-  if (request->content_len == 0 || request->content_len > kMaxRequestBytes) {
-    send_json_rpc_error(request, nullptr, -32600, "Request body must be 1-4096 bytes");
-    return ESP_OK;
-  }
-
-  char *body = static_cast<char *>(malloc(request->content_len + 1));
-  if (body == nullptr) {
-    httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "Request allocation failed");
-    return ESP_FAIL;
-  }
-
-  size_t received = 0;
-  while (received < request->content_len) {
-    const int result = httpd_req_recv(request, body + received, request->content_len - received);
-    if (result <= 0) {
-      free(body);
-      if (result == HTTPD_SOCK_ERR_TIMEOUT) {
-        httpd_resp_send_408(request);
-      }
-      return ESP_FAIL;
-    }
-    received += static_cast<size_t>(result);
-  }
-  body[received] = '\0';
-
-  cJSON *message = cJSON_ParseWithLength(body, received);
-  free(body);
+  cJSON *message = receive_json(request);
   if (message == nullptr) {
-    send_json_rpc_error(request, nullptr, -32700, "Parse error");
+    send_json_rpc_error(request, nullptr, -32700, "Request body must contain valid JSON up to 4096 bytes");
     return ESP_OK;
   }
-
   const cJSON *id = cJSON_GetObjectItemCaseSensitive(message, "id");
   const cJSON *jsonrpc = cJSON_GetObjectItemCaseSensitive(message, "jsonrpc");
   const cJSON *method = cJSON_GetObjectItemCaseSensitive(message, "method");
   const cJSON *params = cJSON_GetObjectItemCaseSensitive(message, "params");
-  if (!cJSON_IsString(jsonrpc) || strcmp(jsonrpc->valuestring, "2.0") != 0 ||
-      !cJSON_IsString(method)) {
+  if (!cJSON_IsString(jsonrpc) || strcmp(jsonrpc->valuestring, "2.0") != 0 || !cJSON_IsString(method)) {
     send_json_rpc_error(request, id, -32600, "Invalid JSON-RPC request");
   } else if (strcmp(method->valuestring, "initialize") == 0) {
     handle_initialize(request, id);
@@ -365,7 +461,6 @@ esp_err_t mcp_handler(httpd_req_t *request) {
   } else {
     send_json_rpc_error(request, id, -32601, "Method not found");
   }
-
   cJSON_Delete(message);
   return ESP_OK;
 }
@@ -375,36 +470,19 @@ esp_err_t mcp_handler(httpd_req_t *request) {
 namespace mcp_server {
 
 void start() {
-  if (g_server != nullptr) {
-    return;
-  }
-
+  if (g_server != nullptr) return;
   httpd_config_t configuration = HTTPD_DEFAULT_CONFIG();
   configuration.server_port = 80;
-  configuration.max_uri_handlers = 4;
-
+  configuration.max_uri_handlers = 6;
   ESP_ERROR_CHECK(httpd_start(&g_server, &configuration));
-  const httpd_uri_t mcp_endpoint = {
-      .uri = "/mcp",
-      .method = HTTP_POST,
-      .handler = mcp_handler,
-      .user_ctx = nullptr,
+  const httpd_uri_t endpoints[] = {
+      {.uri = "/mcp", .method = HTTP_POST, .handler = mcp_handler, .user_ctx = nullptr},
+      {.uri = "/", .method = HTTP_GET, .handler = dashboard_handler, .user_ctx = nullptr},
+      {.uri = "/api/status", .method = HTTP_GET, .handler = status_api_handler, .user_ctx = nullptr},
+      {.uri = "/api/gpio/configure", .method = HTTP_POST, .handler = gpio_configure_api_handler, .user_ctx = nullptr},
+      {.uri = "/api/gpio/write", .method = HTTP_POST, .handler = gpio_write_api_handler, .user_ctx = nullptr},
   };
-  ESP_ERROR_CHECK(httpd_register_uri_handler(g_server, &mcp_endpoint));
-  const httpd_uri_t dashboard_endpoint = {
-      .uri = "/",
-      .method = HTTP_GET,
-      .handler = dashboard_handler,
-      .user_ctx = nullptr,
-  };
-  const httpd_uri_t status_endpoint = {
-      .uri = "/api/status",
-      .method = HTTP_GET,
-      .handler = status_api_handler,
-      .user_ctx = nullptr,
-  };
-  ESP_ERROR_CHECK(httpd_register_uri_handler(g_server, &dashboard_endpoint));
-  ESP_ERROR_CHECK(httpd_register_uri_handler(g_server, &status_endpoint));
+  for (const httpd_uri_t &endpoint : endpoints) ESP_ERROR_CHECK(httpd_register_uri_handler(g_server, &endpoint));
   ESP_LOGI(kLogTag, "MCP server listening on http://esp32-mcp.local/mcp");
 }
 
